@@ -66,19 +66,16 @@ class FA_Block(tf.keras.layers.Layer):
     self.add = layers.Add()
     self.conv_2 = layers.Conv2D(filters,kernel_size=kernel,padding='same',activation='relu')
     self.body = [CA_Block(filters),PA_Block(filters)]
-    self.state_size = tf.TensorShape([128,128,3])
 
   def build(self,input_shapes):
     h,w,channels = input_shapes[1:]
-    self.state_size = tf.TensorShape(input_shapes[1:])
     self.layer_body = tf.keras.Sequential([layers.Input([h,w,channels]),*self.body])
     self.built = True
   
-  def call(self,inputs, states):
-    prev_output = states[0]
+  def call(self,inputs, state):
     x_feat = self.cnv_1(inputs)
-    x_feat = self.add([inputs,x_feat, prev_out])
+    x_feat = self.add([inputs,x_feat, state])
     x_feat = self.conv_2(x_feat)
     x_feat = self.layer_body(x_feat)
     out = self.add([inputs,x_feat])
-    return out
+    return out, state
