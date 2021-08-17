@@ -29,8 +29,11 @@ class TrainLoop():
     @tf.function
     def train_step(self, input_batch, gt_batch):
         with tf.GradientTape(persistent=False) as tape:
-            output_batch = self.model([input_batch], training=True)
-            net_loss = self.calculate_loss(input_batch, gt_batch, output_batch)
+            output_batch = self.model(input_batch, training=True)
+            net_loss = 0
+            for i in range(cfg.rnn_iterations):
+                net_loss += self.calculate_loss(input_batch, gt_batch, output_batch[i])
+            net_loss = net_loss/cfg.rnn_iterations
         gradients = tape.gradient(net_loss, self.model.trainable_weights)
         self.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
         self.train_loss(net_loss)
@@ -46,9 +49,11 @@ class TrainLoop():
             self.train_step(input_batch, gt_batch)
         return
 
-    @tf.function
+    # @tf.function
     def val_step(self, input_batch, gt_batch):
-        hdr_output = self.model([input_batch], training=False)
+        hdr_output = self.model(input_batch, training=False)
+        print(tf.shape(hdr_output))
+        hdr_output = hdr_output[-1][0]
         align_ratio = 65535.0/tf.math.reduce_max(hdr_output)
         hdr_output = tf.math.round(hdr_output*align_ratio)
         hdr_output = hdr_output/align_ratio

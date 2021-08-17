@@ -72,10 +72,32 @@ class FA_Block(tf.keras.layers.Layer):
     self.layer_body = tf.keras.Sequential([layers.Input([h,w,channels]),*self.body])
     self.built = True
   
-  def call(self,inputs, state):
+  def call(self,inputs):
     x_feat = self.cnv_1(inputs)
-    x_feat = self.add([inputs,x_feat, state])
+    x_feat = self.add([inputs,x_feat])
     x_feat = self.conv_2(x_feat)
     x_feat = self.layer_body(x_feat)
     out = self.add([inputs,x_feat])
-    return out, state
+    return out
+
+class DilationPyramid(tf.keras.layers.Layer):
+  def __init__(self, dilation_rates = [3,2,1,1], n_filters=32):
+    super(DilationPyramid, self).__init__()
+    self.convs = [Conv2D(n_filters,3,1,'same',dilation_rate = i) for i in dilation_rates]
+    self.relus = [ReLU() for i in range(len(dilation_rates))]
+    self.concats = [layers.Concatenate(axis=-1) for i in range(len(dilation_rates))]
+    self.add = layers.Add()
+  
+  def build(self, input_shape):
+    self.bottleneck = Conv2D(input_shape[-1],1,1,'same')
+
+  def call(self,x_in):
+    x_in_input = x_in
+    in_channels = x_in.shape[-1]
+    for i in range(len(self.convs)):
+        x_out = self.relus[i](x_in)
+        x_out = self.convs[i](x_out)
+        x_in = self.concats[i]([x_in,x_out])
+    x_out = self.bottleneck(x_in) # bottleneck
+    x_out = self.add([x_in_input,x_out])
+    return x_out

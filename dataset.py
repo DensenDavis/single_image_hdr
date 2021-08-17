@@ -99,6 +99,7 @@ class Dataset():
         ds = ds.map(self.read_files, num_parallel_calls=autotune)
         # ds = ds.cache()
         ds = ds.map(self.create_pair, num_parallel_calls=autotune)
+        ds = ds.map(self.create_val_crop, num_parallel_calls=autotune)
         if cfg.val_augmentation:
             ds = ds.map(self.val_augmentation, num_parallel_calls=autotune)
             # ds = ds.unbatch()

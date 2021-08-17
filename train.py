@@ -1,10 +1,10 @@
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import numpy as np
 import tensorflow as tf
 from model import get_model
 from config import Configuration
-from dataset2 import Dataset
+from dataset import Dataset
 from train_loop import TrainLoop
 from utils import clone_checkpoint
 from tensorflow.keras.optimizers.schedules import PiecewiseConstantDecay as lr_decay
@@ -15,7 +15,7 @@ lr_schedule = lr_decay(
     boundaries=[i*dataset.num_train_batches for i in cfg.lr_boundaries],
     values=cfg.lr_values)
 
-model = get_model([None, None, 3])
+model = get_model([2, 128, 128, 3])
 optimizer = tf.keras.optimizers.Adam(lr_schedule)
 tb_writer = tf.summary.create_file_writer(cfg.log_dir)
 train_obj = TrainLoop(dataset, model, optimizer)
