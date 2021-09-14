@@ -1,38 +1,58 @@
 import tensorflow as tf
 import math
+import glob
 import numpy as np
+import cv2
+from tqdm import tqdm
 from config import Configuration
 autotune = tf.data.experimental.AUTOTUNE
 cfg = Configuration()
 
 class Dataset():
-    def __init__(self):
-        self.train_gt_files = sorted(tf.io.gfile.glob(cfg.train_gt_path))
-        self.train_gt_ar_files = sorted(tf.io.gfile.glob(cfg.train_gt_alignratio_path))
-        self.train_input_files = sorted(tf.io.gfile.glob(cfg.train_input_path))
-        self.num_train_imgs = len(self.train_input_files)
-        self.size_permutation_range = self.permute_resolutions()
-        self.num_train_batches = math.ceil(self.num_train_imgs/cfg.train_batch_size)
-        self.val_gt_files = sorted(tf.io.gfile.glob(cfg.val_gt_path))
-        self.val_gt_ar_files = sorted(tf.io.gfile.glob(cfg.val_gt_alignratio_path))
-        self.val_input_files = sorted(tf.io.gfile.glob(cfg.val_input_path))
-        self.num_val_images = len(self.val_input_files)
-        self.train_ds = self.get_train_data()
-        self.val_ds = self.get_val_data()
+    def __init__(self, tpu_strategy):
+        self.train_gt_files = self.read_images(sorted(glob.glob(cfg.train_gt_path)), "train gt")
+        self.train_gt_ar_files = self.read_align_ratios(sorted(glob.glob(cfg.train_gt_alignratio_path)))
+        self.train_input_files = self.read_images(sorted(glob.glob(cfg.train_input_path)),"train input")
+        self.num_train_imgs = self.train_input_files.shape[0]
+        self.num_train_batches = self.num_train_imgs/cfg.train_batch_size
+        self.val_gt_files = self.read_images(sorted(glob.glob(cfg.val_gt_path)),"val gt")
+        self.val_gt_ar_files = self.read_align_ratios(sorted(glob.glob(cfg.val_gt_alignratio_path)))
+        self.val_input_files = self.read_images(sorted(glob.glob(cfg.val_input_path)),"val input")
+        self.num_val_images = self.val_input_files.shape[0]
+        self.train_ds = tpu_strategy.experimental_distribute_dataset(self.get_train_data())
+        self.val_ds = tpu_strategy.experimental_distribute_dataset(self.get_val_data())
 
-    def permute_resolutions(self):
-        min_power = math.log2(cfg.min_train_res)
-        max_power = math.log2((cfg.train_img_shape[0]*cfg.train_img_shape[1])//cfg.min_train_res)
-        return [int(min_power),int(max_power)]
+    def extract_chunks(self, lst, chunk_size=10):
+        for i in range(0, len(lst), chunk_size):
+            yield lst[i:i + chunk_size]
 
-    def read_align_ratio(self, filename):
-        align_ratio = np.load(filename.numpy()).astype(np.float32)
-        return align_ratio
+    def read_images(self, filenames, image_type):
+        files_tf = None
+        chunk_size = 50
+        n_chunks = math.ceil(len(filenames)//chunk_size)
+        batches = self.extract_chunks(filenames, chunk_size)
+        pbar = tqdm(batches, desc=f'Reading {image_type} images -> chunk size = 50', total=n_chunks)
+        for batch in pbar:
+            file_raw = []
+            for i in batch:
+                with open(i, 'rb') as f:
+                    file_raw.append(f.read())
+            files_np =  np.asarray(file_raw)
+            if files_tf is None:
+                files_tf = tf.convert_to_tensor(files_np)
+            else:
+                files_tf = tf.concat([files_tf,tf.convert_to_tensor(files_np)], axis=0)
+        print(f'Extraction complete. Total {image_type} files = {files_tf.shape[0]}')
+        return files_tf
 
-    def read_files(self, input_img_path, target_img_path, gt_ds_alignratio):
-        input_img = tf.io.read_file(input_img_path)
+    def read_align_ratios(self, filenames):
+        align_ratios = []
+        for i in filenames:
+            align_ratios.append(np.load(i).astype(np.float32))
+        return tf.convert_to_tensor(align_ratios)
+
+    def decode_images(self, input_img, target_img, gt_ds_alignratio):
         input_img = tf.image.decode_image(input_img, dtype=tf.dtypes.uint8)
-        target_img = tf.io.read_file(target_img_path)
         target_img = tf.image.decode_image(target_img, dtype=tf.dtypes.uint16)
         return input_img, target_img, gt_ds_alignratio
 
@@ -40,7 +60,7 @@ class Dataset():
         input_img = tf.cast(input_img, tf.dtypes.float32)
         input_img = input_img/255.0
         target_img = tf.cast(target_img, tf.dtypes.float32)
-        target_img = target_img/gt_ds_alignratio[0]
+        target_img = target_img/gt_ds_alignratio
         return tf.concat([input_img, target_img], axis=-1)
 
     def create_train_crop(self, img_pair):
@@ -48,8 +68,8 @@ class Dataset():
         return img_patch
 
     def create_val_crop(self, img_pair):
-        img_patch = tf.image.random_crop(img_pair, [cfg.val_img_shape[0], cfg.val_img_shape[1], cfg.val_img_shape[-1]*2])
-        return img_patch
+        img_pair = tf.image.crop_to_bounding_box(img_pair, 0, 0, cfg.val_img_shape[0], cfg.val_img_shape[1])
+        return img_pair
 
     def split_train_pair(self, image_pair):
         return image_pair[:,:,:cfg.train_img_shape[-1]],image_pair[:,:,cfg.train_img_shape[-1]:]
@@ -74,18 +94,15 @@ class Dataset():
         input_ds = tf.data.Dataset.from_tensor_slices(self.train_input_files)
         gt_ds = tf.data.Dataset.from_tensor_slices(self.train_gt_files)
         gt_ds_alignratio = tf.data.Dataset.from_tensor_slices(self.train_gt_ar_files)
-        gt_ds_alignratio = gt_ds_alignratio.map(lambda fileName: tuple(tf.py_function(self.read_align_ratio, [fileName], [tf.float32])))
         ds = tf.data.Dataset.zip((input_ds, gt_ds, gt_ds_alignratio))
-        ds = ds.shuffle(buffer_size=1000, reshuffle_each_iteration=True)
-        ds = ds.map(self.read_files, num_parallel_calls=autotune)
-        # ds = ds.cache()
         ds = ds.shuffle(buffer_size=50, reshuffle_each_iteration=True)
+        ds = ds.map(self.decode_images, num_parallel_calls=autotune)
         ds = ds.map(self.create_pair, num_parallel_calls=autotune)
         ds = ds.map(self.create_train_crop, num_parallel_calls=autotune)
         if cfg.train_augmentation:
             ds = ds.map(self.train_augmentation, num_parallel_calls=autotune)
         ds = ds.map(self.split_train_pair, num_parallel_calls=autotune)
-        ds = ds.batch(cfg.train_batch_size, drop_remainder=False)
+        ds = ds.batch(cfg.train_batch_size, drop_remainder=True)
         ds = ds.prefetch(buffer_size=autotune)
         return ds
 
@@ -93,19 +110,17 @@ class Dataset():
         input_ds = tf.data.Dataset.from_tensor_slices(self.val_input_files)
         gt_ds = tf.data.Dataset.from_tensor_slices(self.val_gt_files)
         gt_ds_alignratio = tf.data.Dataset.from_tensor_slices(self.val_gt_ar_files)
-        gt_ds_alignratio = gt_ds_alignratio.map(lambda fileName: tuple(tf.py_function(self.read_align_ratio, [fileName], [tf.float32])))
         ds = tf.data.Dataset.zip((input_ds, gt_ds, gt_ds_alignratio))
         # ds = ds.shuffle(buffer_size=20, reshuffle_each_iteration=True)
-        ds = ds.map(self.read_files, num_parallel_calls=autotune)
-        # ds = ds.cache()
+        ds = ds.map(self.decode_images, num_parallel_calls=autotune)
         ds = ds.map(self.create_pair, num_parallel_calls=autotune)
         ds = ds.map(self.create_val_crop, num_parallel_calls=autotune)
         if cfg.val_augmentation:
             ds = ds.map(self.val_augmentation, num_parallel_calls=autotune)
-            # ds = ds.unbatch()
-            # ds = ds.shuffle(buffer_size=20, reshuffle_each_iteration=True)
-            # ds = ds.batch(cfg.val_batch_size)
+            ds = ds.unbatch()
+            ds = ds.shuffle(buffer_size=20, reshuffle_each_iteration=True)
+            ds = ds.batch(cfg.val_batch_size)
         ds = ds.map(self.split_val_pair, num_parallel_calls=autotune)
-        ds = ds.batch(cfg.val_batch_size, drop_remainder=False)
-        # ds = ds.prefetch(buffer_size=autotune)
+        ds = ds.batch(cfg.val_batch_size, drop_remainder=True)
+        ds = ds.prefetch(buffer_size=autotune)
         return ds
